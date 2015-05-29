@@ -100,6 +100,7 @@ def test_write_read_empty():
 
     shutil.rmtree(dirname)
 
+
 def test_coerce_int_long_in_unions():
     schema = ''' [ "null", "long"] '''
 
@@ -145,3 +146,12 @@ def test_union_with_bool():
         read_recs = list(reader)
         attr_values = [ r.attr1 for r in read_recs ]
         assert attr_values == [ None, True, True, False ]
+
+
+def test_bad_file_argument():
+    try:
+        with tempfile.NamedTemporaryFile() as fp:
+            writer = pyavroc.AvroFileWriter(fp, '["null", "int"]')
+            writer.close()
+    except TypeError:
+        pass
