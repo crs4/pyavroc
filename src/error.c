@@ -43,7 +43,20 @@ set_error_prefix(const char *format, ...)
 
     PyErr_Fetch(&type, &value, &traceback);
 
-    PyString_ConcatAndDel(&newmessage, PyObject_Str(value));
+    PyObject *str_value = PyObject_Str(value);
+    if (str_value) {
+        PyString_ConcatAndDel(&newmessage, str_value);
+        if (!newmessage) {
+            PyErr_Warn(PyExc_RuntimeWarning, "Error forming exception message");
+            // leave the current exception value
+            newmessage = value;
+            // str_value should have been decref'ed by PyString_ConcatAndDel
+        }
+    }
+    else {
+        PyErr_Warn(PyExc_RuntimeWarning, "Error forming exception message");
+        newmessage = value;
+    }
 
     PyErr_Restore(type, newmessage, traceback);  /* steals refs */
 }
