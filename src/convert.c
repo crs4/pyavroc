@@ -17,6 +17,7 @@
 #include "convert.h"
 #include "record.h"
 #include "avroenum.h"
+#include "error.h"
 #include <avro/schema.h>
 
 static PyObject *avro_types_type = NULL;
@@ -93,7 +94,7 @@ declare_types(ConvertInfo *info, avro_schema_t schema)
             for (i = 0; i < field_count; i++) {
                 PyObject *field_type = declare_types(info, avro_schema_record_field_get_by_index(schema, i));
                 /* this will INCREF, so takes hold of the object */
-                PyMapping_SetItemString(field_types, avro_schema_record_field_name(schema, i), field_type);
+                PyMapping_SetItemString(field_types, (char*)avro_schema_record_field_name(schema, i), field_type);
             }
             Py_DECREF(field_types);
             return record_type;
@@ -151,12 +152,12 @@ enum_to_python_object(ConvertInfo *info, avro_value_t *value)
     const char *name;
 
     avro_schema_t schema = avro_value_get_schema(value);
-    PyObject *type = (PyObject *)get_python_enum_type(info->types, schema);
+    PyObject *type = get_python_enum_type(info->types, schema);
 
     avro_value_get_enum(value, &val);
     name = avro_schema_enum_get(schema, val);
 
-    AvroEnum *obj = (AvroEnum *)PyObject_GetAttrString(type, name);
+    PyObject *obj = PyObject_GetAttrString(type, name);
 
     return obj;
 }
@@ -378,7 +379,7 @@ python_to_array(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
     element_count = PyObject_Length(pyobj);
 
     if (element_count < 0) {
-        avro_set_error("Error getting length for array");
+        set_error_prefix("while finding length for array: ");
         return EINVAL;
     }
 
@@ -444,7 +445,7 @@ get_branch_index(ConvertInfo *info, PyObject *pyobj, avro_schema_t schema)
     if (pyobj == Py_None) {
         typename = "null";
     } else {
-        if (PyString_CheckExact(pyobj)) {
+        if (PyString_CheckExact(pyobj) || PyUnicode_CheckExact(pyobj)) {
             typename = "string";
         } else if (PyList_CheckExact(pyobj)) {
             typename = "array";
@@ -629,9 +630,8 @@ python_to_record(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
             Py_DECREF(pyval);
         }
         if (rval) {
-            avro_prefix_error("when writing to %s.%s, ",
-                    avro_schema_name(avro_value_get_schema(dest)),
-                    field_name);
+            const char *record_name = avro_schema_name(avro_value_get_schema(dest));
+            set_error_prefix("when writing to %s.%s, ", record_name, field_name);
             return rval;
         }
     }
@@ -639,34 +639,11 @@ python_to_record(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
     return 0;
 }
 
-static void
-set_type_error(const PyObject*const pyobj, const char*const desired_type)
-{
-    if (pyobj == NULL) {
-        avro_set_error("Missing Python object where one was expected.");
-    }
-    else {
-        PyObject* the_string = PyObject_Repr(pyobj);
-        if (the_string) {
-            PyObject* str = PyString_FromFormat("%.100s", PyString_AsString(the_string));
-            Py_DECREF(the_string);
-            the_string = str;
-        }
-
-        if (the_string) {
-            avro_set_error("Invalid python object for %s.  Got: %s", desired_type, PyString_AsString(the_string));
-            Py_DECREF(the_string);
-        }
-        else
-            avro_set_error("Invalid python object for %s. Unable to print argument value.", desired_type);
-    }
-}
-
 int
 python_to_avro(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
 {
     if (pyobj == NULL) {
-        avro_set_error("Missing object.  Expected a %d\n", avro_value_get_type(dest));
+        PyErr_Format(PyExc_TypeError, "Missing object.  Expected a %d\n", avro_value_get_type(dest));
         return EINVAL;
     }
 
@@ -675,101 +652,81 @@ python_to_avro(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
         {
             int retval = PyObject_IsTrue(pyobj);
             if (retval < 0) {
-                set_type_error(pyobj, "BOOLEAN");
-                return EINVAL;
+                return set_type_error(EINVAL, pyobj);
             }
-            else {
-                return avro_value_set_boolean(dest, retval);
-            }
+            return set_avro_error(avro_value_set_boolean(dest, retval));
         }
     case AVRO_BYTES:
         {
             char *buf;
             Py_ssize_t len;
-            if (PyString_AsStringAndSize(pyobj, &buf, &len) >= 0) {
-                /* we're holding internal data so use "set" not "give" */
-                return avro_value_set_bytes(dest, buf, len);
+            if (PyString_AsStringAndSize(pyobj, &buf, &len) < 0) {
+                return set_type_error(EINVAL, pyobj);
             }
-            else {
-                set_type_error(pyobj, "BYTES");
-                return EINVAL;
-            }
+            /* we're holding internal data so use "set" not "give" */
+            return set_avro_error(avro_value_set_bytes(dest, buf, len));
         }
     case AVRO_DOUBLE:
         {
             double retval = PyFloat_AsDouble(pyobj);
             if (retval == -1.0 && PyErr_Occurred()) {
-                set_type_error(pyobj, "DOUBLE");
-                return EINVAL;
+                return set_type_error(EINVAL, pyobj);
             }
-            else
-                return avro_value_set_double(dest, retval);
+            return set_avro_error(avro_value_set_double(dest, retval));
         }
     case AVRO_FLOAT:
         {
             double retval = PyFloat_AsDouble(pyobj);
             if (retval == -1.0 && PyErr_Occurred()) {
-                set_type_error(pyobj, "FLOAT");
-                return EINVAL;
+                return set_type_error(EINVAL, pyobj);
             }
-            else
-                return avro_value_set_float(dest, retval);
+            return set_avro_error(avro_value_set_float(dest, retval));
         }
     case AVRO_INT32:
         {
             long retval = PyInt_AsLong(pyobj);
             if (retval == -1L && PyErr_Occurred()) {
-                set_type_error(pyobj, "INT32");
-                return EINVAL;
+                return set_type_error(EINVAL, pyobj);
             }
-            else
-                return avro_value_set_int(dest, retval);
+            return set_avro_error(avro_value_set_int(dest, retval));
         }
     case AVRO_INT64:
         {
             long long retval = PyLong_AsLongLong(pyobj);
             if (retval == -1L && PyErr_Occurred()) {
-                set_type_error(pyobj, "INT64");
-                return EINVAL;
+                return set_type_error(EINVAL, pyobj);
             }
-            else
-                return avro_value_set_long(dest, retval);
+            return set_avro_error(avro_value_set_long(dest, retval));
         }
     case AVRO_NULL:
-        return avro_value_set_null(dest);
+        return set_avro_error(avro_value_set_null(dest));
     case AVRO_STRING:
         {
             char *buf;
             Py_ssize_t len;
-            if (PyString_AsStringAndSize(pyobj, &buf, &len) >= 0)
-                return avro_value_set_string_len(dest, buf, len + 1);
-            else {
-                set_type_error(pyobj, "STRING");
-                return EINVAL;
+            if (PyString_AsStringAndSize(pyobj, &buf, &len) < 0) {
+                return set_type_error(EINVAL, pyobj);
             }
+            return set_avro_error(avro_value_set_string_len(dest, buf, len + 1));
         }
     case AVRO_ARRAY:
         return python_to_array(info, pyobj, dest);
     case AVRO_ENUM:
         {
             int index = validate(pyobj, avro_value_get_schema(dest));
-            if (index < 0) {
-                set_type_error(pyobj, "ENUM");
-                return EINVAL;
+            if (index < 0 || PyErr_Occurred()) {
+                return set_type_error(EINVAL, pyobj);
             }
-            return avro_value_set_enum(dest, index);
+            return set_avro_error(avro_value_set_enum(dest, index));
         }
     case AVRO_FIXED:
         {
             char *buf;
             Py_ssize_t len;
-            if (PyString_AsStringAndSize(pyobj, &buf, &len) >= 0) {
-                return avro_value_set_fixed(dest, buf, len);
+            if (PyString_AsStringAndSize(pyobj, &buf, &len) < 0) {
+                return set_type_error(EINVAL, pyobj);
             }
-            else {
-                set_type_error(pyobj, "FIXED");
-                return EINVAL;
-            }
+            return set_avro_error(avro_value_set_fixed(dest, buf, len));
         }
     case AVRO_MAP:
         return python_to_map(info, pyobj, dest);
