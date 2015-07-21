@@ -707,6 +707,9 @@ python_to_avro(ConvertInfo *info, PyObject *pyobj, avro_value_t *dest)
         {
             char *buf;
             Py_ssize_t len;
+            if (PyUnicode_Check(pyobj)) {
+                pyobj = PyUnicode_AsUTF8String(pyobj);
+            }
             if (PyString_AsStringAndSize(pyobj, &buf, &len) < 0) {
                 return set_type_error(EINVAL, pyobj);
             }
